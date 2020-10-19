@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+#
+# +-------------------------------------------------------------------------+
+# | amdgpu-fancontrol                                                       |
+# +-------------------------------------------------------------------------+
+# | Copyright © 2020 Waldemar Schroeer                                      |
+# |                  waldemar.schroeer(at)rz-amper.de                       |
+# +-------------------------------------------------------------------------+
+
+# Configuration file.
+configfile=/usr/local/etc/amdgpu-fancontrol.conf
+
+function getdatetime () {
+    datetime="$(date "+%d.%m.%Y-%H:%M:%S")"
+    printf "${datetime}"
+}
+
+function log () {
+    echo $(getdatetime) -- $1 >> ${config[logfile]}
+    if [[ ${config[debug]} == "true" ]]; then
+        echo $1
+    fi
+}
+
+function fanmode () {
+    # max(0), manual(1), auto(2)
+    log "Setting fan mode to $1"
+    echo "$1" > ${config[file_fanmode]}
+}
+
+function set_pwm () {
+    new_pwm=$1
+    old_pwm=$(cat ${config[file_pwm]})
+    log "Current PWM: ${old_pwm}, requesting to set PWM to ${new_pwm}"
+    if [[ $(cat ${config[file_fanmode]}) -ne 1 ]]; then
+        log "Fan mode is not set properly. Setting fan mode to manual."
+        fanmode 1
+    fi
+
+    if [[ -z ${temp_at_last_pwm_change} ]] || [[ ${current_temp} -gt ${temp_at_last_pwm_change} ]] || [[ $(( current_temp + config[hysteresis] )) -le ${temp_at_last_pwm_change} ]]; then
+        log "Temperature at last change was ${temp_at_last_pwm_change}."
+        log "changing pwm to ${new_pwm}"
+        echo "${new_pwm}" > ${config[file_pwm]}
+        temp_at_last_pwm_change="$(( $(cat ${config[file_temp]}) / 1000 ))"
+    else
+        log "Not changing pwm as we just did at ${temp_at_last_pwm_change}. Next change when temperature drops below $(( temp_at_last_pwm_change - config[hysteresis] ))"
+    fi
+    
+}
+
+function interpolate_pwm () {
+    i=0
+    current_temp="$(( $(cat ${config[file_temp]}) / 1000 ))"
+    log "Current Temp: ${current_temp}"
+    if [[ ${current_temp} -le ${temps[0]} ]]; then
+        log "Current temp below first temp in list, setting to minimum speed."
+        set_pwm "${pwms[i]}"
+        return
+    elif [[ ${current_temp} -gt ${temps[-1]} ]]; then
+        log "Current temp above last temp in list, setting to maximum speed."
+        set_pwm "${pwms[-1]}"
+        return
+    fi
+
+    for i in "${!temps[@]}"; do
+        if [[ ${current_temp} -gt ${temps[$i]} ]]; then
+            continue
+        fi
+
+        lowertemp=${temps[i-1]}
+        highertemp=${temps[i]}
+        lowerpwm=${pwms[i-1]}
+        higherpwm=${pwms[i]}
+        pwm=$(echo "( ( ${current_temp} - ${lowertemp} ) * ( ${higherpwm} - ${lowerpwm} ) / ( ${highertemp} - ${lowertemp} ) ) + ${lowerpwm}" | bc)
+        log "Interpolated pwm value for current temperature ${current_temp} is: ${pwm}"
+
+        set_pwm "${pwm}"
+        return
+    done
+}
+
+function reset () {
+    log "Exiting and resetting fan mode to auto."
+    fanmode 0
+    if [[ -f ${config[samplefile]} ]]; then
+        cp ${config[samplefile]} ${config[samplefile]}-$(getdatetime)
+    fi
+    exit 0
+}
+
+function rundaemon () {
+    sample=1
+    while true; do
+        interpolate_pwm
+        if [[ ${config[takesamples]} == "true" ]]; then
+            echo "${sample}  ${current_temp}" >> ${config[samplefile]}
+            ((sample++))
+        fi
+        sleep ${config[interval]}s
+    done
+}
+
+# First thing first, no need to proceed any further if not running as root.
+if [[ $UID -ne 0 ]]
+then
+  echo "amdgpu-fancontrol needs to run with root privileges."
+  exit 1
+fi
+
+# Load configuration file if present. Otherwise stop here.
+if [[ -f "${configfile}" ]]; then
+    typeset -A config
+    while IFS== read -r key value; do
+        config[$key]=$value
+    done < <(jq -r '.config | to_entries | .[] | .key + "=" + .value ' ${configfile})
+    declare -a "temps=($(jq -r '.temps | to_entries | .[] | .value' ${configfile}))"
+    declare -a "pwms=($(jq -r '.pwms | to_entries | .[] | .value' ${configfile}))"
+else
+    echo "No configuration file found. It should be located at /etc/amdgpu-fancontrol.conf"
+    exit 1
+fi
+
+# Wiping log and sample file and start over.
+if [[ -f ${config[logfile]} ]]; then
+    cp /dev/null ${config[logfile]}
+fi
+if [[ -f ${config[samplefile]} ]]; then
+    cp /dev/null ${config[samplefile]}
+fi
+log "Starting."
+
+# Checking for sane config.
+if [[ ${#temps[@]} -ne ${#pwms[@]} ]]; then
+    log "Something's wrong. Please check your configuration file at ${configfile}"
+    log "It seems that Temps and PWMs are messed up."
+    exit 1
+fi
+
+# Write configuration to log file.
+log "$(typeset -p config)"
+log "$(typeset -p temps)"
+log "$(typeset -p pwms)"
+
+# Handling signals.
+trap "reset" SIGINT SIGTERM
+
+# Set fan mode to manual.
+# fanmode 1
+
+# Run daemon.
+rundaemon
+
+# Just to be sure.
+exit 0 
