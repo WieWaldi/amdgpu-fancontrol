@@ -24,3 +24,6 @@ systemctl enable amdgpu-fancontrol
 Please don't run this script without knowing what you're doing. I'm not
 responsible for your burned up graphics card.
 
+### Notes
+You may take a look at [radeon-profile](https://github.com/marazmista/radeon-profile).
+
