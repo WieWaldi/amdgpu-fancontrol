@@ -93,7 +93,7 @@ function rundaemon () {
     while true; do
         interpolate_pwm
         if [[ ${config[takesamples]} == "true" ]]; then
-            echo "${sample}  ${current_temp}" >> ${config[samplefile]}
+            echo "${sample}  ${current_temp}  ${pwm}" >> ${config[samplefile]}
             ((sample++))
         fi
         sleep ${config[interval]}s
