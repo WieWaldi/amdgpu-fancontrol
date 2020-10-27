@@ -2,8 +2,10 @@
 Description=AMD GPU Fan Control
 
 [Service]
-Type=simple
+ExecStartPre=/bin/sleep 30
 ExecStart=/usr/local/sbin/amdgpu-fancontrol
+Restart=on-failure
+RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
